@@ -1,22 +1,20 @@
 import re
-import chromadb
-from config.settings import CHROMADB_DIR
+from storage import VectorStore, collection_name_for
 
 # 💡 引入修改後的 embeddings 單例與重排器單例方法
 from model.embeddings import embedding_instance
 from model.rerank import get_reranker
 
 def execute_rag_retrieval(user_query, target_id):
-    db_client = chromadb.PersistentClient(path=CHROMADB_DIR)
-    collection_name = f"collection_{target_id}"
-    
+    store = VectorStore()
+    collection_name = collection_name_for(target_id)
+
     # 💡 1. 將 embedding_fn 直接指定為全域的 embedding_instance，避免重複 new 物件
     embedding_fn = embedding_instance
-    collection = db_client.get_collection(name=collection_name, embedding_function=embedding_fn)
-    
+
     # 檢查此資料庫內是否包含任何 VLM 重塑的區塊
     # 透過 get 一個樣本來確認是否存在 type 為 vlm_text 的資料
-    vlm_check = collection.get(where={"type": "vlm_text"}, limit=1)
+    vlm_check = store.get(collection_name, where={"type": "vlm_text"}, limit=1)
     has_vlm_cache = (vlm_check and vlm_check["ids"] and len(vlm_check["ids"]) > 0)
     
     # 如果有 VLM 快取，硬過濾條件強制只讀取 vlm_text；否則不設限（相容舊版純 OCR）
@@ -44,7 +42,7 @@ def execute_rag_retrieval(user_query, target_id):
             else:
                 where_clause = {"page": p}
                 
-            p_res = collection.get(where=where_clause, include=["documents", "metadatas"])
+            p_res = store.get(collection_name, where=where_clause, include=["documents", "metadatas"])
             if p_res and p_res["documents"]:
                 for doc, meta in zip(p_res["documents"], p_res["metadatas"]):
                     t_type = "VLM視覺校正" if meta.get("type") == "vlm_text" else "原始內文"
@@ -58,9 +56,10 @@ def execute_rag_retrieval(user_query, target_id):
     query_vector = embedding_fn.embed_query(user_query)
     
     # 將過濾條件加入 query 中
-    raw_results = collection.query(
+    raw_results = store.query(
+        collection_name,
         query_embeddings=[query_vector],
-        n_results=25, 
+        n_results=25,
         where=filter_condition, # 🌟 帶入 VLM 優先過濾器
         include=["documents", "metadatas"]
     )

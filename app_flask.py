@@ -27,6 +27,7 @@ from config.settings import RAW_DATA_DIR, CHROMADB_DIR
 from indexer.indexer import build_vector_index
 from retriever.retriever import execute_rag_retrieval
 from model.llm import query_llm, get_local_models
+from storage import VectorStore, collection_name_for
 
 # 从 config.settings 引入 CHROMADB_DIR
 from config.settings import RAW_DATA_DIR, CHROMADB_DIR
@@ -272,12 +273,9 @@ def merge_chroma_and_notes(fork_chroma_dir, main_chroma_dir, conflict_strategy="
     """
     將外部解壓後的 ChromaDB 與 database_notes.json 合併至目前的系統中
     """
-    import chromadb
-    from model.embeddings import embedding_instance
-    
-    src_client = chromadb.PersistentClient(path=fork_chroma_dir)
-    dst_client = chromadb.PersistentClient(path=main_chroma_dir)
-    
+    src_store = VectorStore(path=fork_chroma_dir)
+    dst_store = VectorStore(path=main_chroma_dir)
+
     # 讀取現有的備註與來源備註
     src_notes_path = os.path.join(fork_chroma_dir, "database_notes.json")
     dst_notes_path = os.path.join(main_chroma_dir, "database_notes.json")
@@ -299,17 +297,14 @@ def merge_chroma_and_notes(fork_chroma_dir, main_chroma_dir, conflict_strategy="
             pass
 
     # 獲取目前系統中已有的集合
-    existing_collections = [c.name for c in dst_client.list_collections()]
+    existing_collections = dst_store.list_collection_names()
 
-    for col_info in src_client.list_collections():
-        col_name = col_info.name
-        
+    for col_name in src_store.list_collection_names():
         # 提取 doc_id (格式為 collection_{doc_id})
         doc_id = col_name.replace("collection_", "")
-        
-        src_col = src_client.get_collection(col_name, embedding_function=embedding_instance)
-        src_data = src_col.get(include=["documents", "metadatas", "embeddings"])
-        
+
+        src_data = src_store.get(col_name, include=["documents", "metadatas", "embeddings"])
+
         if not src_data["ids"]:
             continue
 
@@ -319,8 +314,7 @@ def merge_chroma_and_notes(fork_chroma_dir, main_chroma_dir, conflict_strategy="
             src_dim = len(src_data["embeddings"][0])
             if col_name in existing_collections:
                 try:
-                    dst_col_test = dst_client.get_collection(col_name, embedding_function=embedding_instance)
-                    dst_data_test = dst_col_test.get(include=["embeddings"], limit=1)
+                    dst_data_test = dst_store.get(col_name, include=["embeddings"], limit=1)
                     if dst_data_test["embeddings"] and len(dst_data_test["embeddings"][0]) != src_dim:
                         raise ValueError(f"集合 {col_name} 的向量維度不符（{src_dim} vs {len(dst_data_test['embeddings'][0])}），拒絕合併。")
                 except Exception as e:
@@ -336,22 +330,18 @@ def merge_chroma_and_notes(fork_chroma_dir, main_chroma_dir, conflict_strategy="
             if conflict_strategy == "skip":
                 action = "skip"
             elif conflict_strategy == "overwrite":
-                dst_client.delete_collection(col_name)
+                dst_store.delete_collection(col_name)
                 action = "insert"
             elif conflict_strategy == "rename":
                 target_doc_id = f"{doc_id}_fork"
-                target_col_name = f"collection_{target_doc_id}"
+                target_col_name = collection_name_for(target_doc_id)
                 action = "insert"
 
-        # --- 執行 ChromaDB 資料寫入 ---
+        # --- 執行向量資料寫入 ---
         if action == "insert":
-            dst_col = dst_client.get_or_create_collection(
-                name=target_col_name,
-                embedding_function=embedding_instance,
-                metadata={"hnsw:space": "cosine"}
-            )
             # 使用 upsert 確保大量 ID 寫入時不會因重複而報錯
-            dst_col.upsert(
+            dst_store.upsert(
+                target_col_name,
                 ids=src_data["ids"],
                 documents=src_data["documents"],
                 metadatas=src_data["metadatas"],
@@ -397,19 +387,14 @@ def api_get_models():
 
 @app.route("/api/check_file", methods=["POST"])
 def api_check_file():
-    import chromadb
     file_name = request.json.get("file_name", "")
     if not file_name:
         return jsonify({"error": "Invalid file name"}), 400
-        
+
     file_base_name = os.path.splitext(file_name)[0]
     base_doc_id = hashlib.md5(file_base_name.encode('utf-8')).hexdigest()
-    
-    db_client = chromadb.PersistentClient(path=CHROMADB_DIR)
-    existing_collections = [c.name for c in db_client.list_collections()]
-    target_collection_name = f"collection_{base_doc_id}"
-    
-    is_duplicate = target_collection_name in existing_collections
+
+    is_duplicate = VectorStore().has_collection(collection_name_for(base_doc_id))
     return jsonify({
         "base_doc_id": base_doc_id,
         "is_duplicate": is_duplicate
@@ -550,16 +535,13 @@ def api_inspect_chunks():
         return jsonify({"error": "Missing doc_id"}), 400
         
     try:
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMADB_DIR)
-        collection_name = f"collection_{target_id}"
-        
-        existing = [c.name for c in client.list_collections()]
-        if collection_name not in existing:
+        store = VectorStore()
+        collection_name = collection_name_for(target_id)
+
+        if not store.has_collection(collection_name):
             return jsonify({"error": "Collection target ID not found."}), 400
-            
-        collection = client.get_collection(name=collection_name)
-        cached_data = collection.get(include=["documents", "metadatas"])
+
+        cached_data = store.get(collection_name, include=["documents", "metadatas"])
         
         chunks_list = []
         if cached_data and cached_data["ids"]:
@@ -579,10 +561,9 @@ def api_inspect_chunks():
 @app.route("/api/list_databases")
 def api_list_databases():
     try:
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMADB_DIR)
-        collections = client.list_collections()
-        
+        store = VectorStore()
+        collection_names = store.list_collection_names()
+
         notes_data = {}
         if os.path.exists(NOTES_FILE):
             try:
@@ -592,15 +573,15 @@ def api_list_databases():
                 notes_data = {}
         
         db_list = []
-        for idx, col in enumerate(collections):
-            if not col.name.startswith("collection_"):
+        for idx, col_name in enumerate(collection_names):
+            if not col_name.startswith("collection_"):
                 continue
-                
-            total_chunks = col.count()
+
+            total_chunks = store.count(col_name)
             orig_name = "未知檔案"
             page_desc = "未知頁碼"
-            
-            col_data = col.get(limit=1)
+
+            col_data = store.get(col_name, limit=1, include=["metadatas"])
             if col_data and col_data["metadatas"]:
                 for m in col_data["metadatas"]:
                     if m and "source" in m:
@@ -608,12 +589,11 @@ def api_list_databases():
                     if m and "start_page" in m and "end_page" in m:
                         page_desc = f"Page {m['start_page']} ~ Page {m['end_page']}"
                         break
-                        
-            clean_doc_id = col.name.replace("collection_", "")
+
+            clean_doc_id = col_name.replace("collection_", "")
             saved_notes = notes_data.get(clean_doc_id, "")
             if not saved_notes:
-                col_meta = col.metadata if col.metadata else {}
-                saved_notes = col_meta.get("notes", "")
+                saved_notes = store.get_collection_metadata(col_name).get("notes", "")
 
             db_list.append({
                 "index": idx + 1,
@@ -661,9 +641,7 @@ def api_delete_database():
         return jsonify({"error": "Missing target identifier"}), 400
         
     try:
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMADB_DIR)
-        client.delete_collection(name=f"collection_{target_doc_id}")
+        VectorStore().delete_collection(collection_name_for(target_doc_id))
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": f"Deletion failed: {e}"}), 400

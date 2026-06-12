@@ -312,8 +312,7 @@ def _vlm_timeout_monitor(page_num, stop_event, worker_thread):
         time.sleep(2.0)
 
 def reconstruct_pages_via_vlm(target_doc_id, provider, model_name, target_ip, target_port, worker_thread=None):
-    import chromadb
-    from config.settings import CHROMADB_DIR
+    from storage import VectorStore, collection_name_for
     from langchain_text_splitters import RecursiveCharacterTextSplitter
     
     print("[VLM Entry Verification]")
@@ -344,12 +343,11 @@ def reconstruct_pages_via_vlm(target_doc_id, provider, model_name, target_ip, ta
         print(f"[VLM FATAL ERROR] Unexpected error during health check: {str(e)[:100]}. Aborting.")
         return []
     
-    client = chromadb.PersistentClient(path=CHROMADB_DIR)
-    collection_name = f"collection_{target_doc_id}"
-    
+    store = VectorStore()
+    collection_name = collection_name_for(target_doc_id)
+
     try:
-        collection = client.get_collection(name=collection_name)
-        existing_data = collection.get(include=["metadatas"])
+        existing_data = store.get(collection_name, include=["metadatas"])
     except Exception:
         return []
         
