@@ -17,6 +17,9 @@ from config.settings import OUTPUT_TABLES_DIR, BASE_PATH
 OUTPUT_IMAGES_DIR = os.path.join(os.path.dirname(OUTPUT_TABLES_DIR), "out_images")
 os.makedirs(OUTPUT_IMAGES_DIR, exist_ok=True)
 
+# 單頁 VLM 請求的最長等待秒數，逾時即由 requests 中斷，避免 worker thread 永久阻塞
+VLM_TIMEOUT_SECONDS = 600
+
 def group_words_to_lines(words, line_tol=3):
     if not words:
         return ""
@@ -290,22 +293,21 @@ def convert_pages_to_chunks(pages_info, source_name="", start_page=None, end_pag
 
 def _vlm_timeout_monitor(page_num, stop_event, worker_thread):
     """
-    Background non-blocking watcher thread to alert the user when a single page 
-    VLM processing block exceeds the 600-second threshold.
+    Background non-blocking watcher thread that actively cancels the VLM task
+    when a single page exceeds the VLM_TIMEOUT_SECONDS threshold.
     """
     start_time = time.time()
-    warned = False
     while not stop_event.is_set():
         if worker_thread and not worker_thread.is_running:
             break
         elapsed = time.time() - start_time
-        if elapsed >= 600.0 and not warned:
+        if elapsed >= float(VLM_TIMEOUT_SECONDS):
             print("\n" + "="*80)
-            print(f"[VLM WARNING] Page {page_num} processing has exceeded 600 seconds (10 minutes)!")
-            print("              If local server resources show 0% load, the engine may be frozen.")
-            print("              The user can manually trigger 'Cancel' via the UI control panel at any time.")
+            print(f"[VLM TIMEOUT] Page {page_num} processing has exceeded {VLM_TIMEOUT_SECONDS} seconds!")
+            print("              The engine appears frozen. Sending active cancel signal to stop the task.")
             print("="*80 + "\n")
-            warned = True
+            if worker_thread:
+                worker_thread.is_running = False
             break
         time.sleep(2.0)
 
@@ -418,7 +420,12 @@ def reconstruct_pages_via_vlm(target_doc_id, provider, model_name, target_ip, ta
                 daemon=True
             )
             monitor_thread.start()
-            
+
+            if worker_thread and not worker_thread.is_running:
+                monitor_stop.set()
+                print(f"[VLM Reconstruct] Cancelled right before dispatching request for page {page_num}.")
+                break
+
             if "ollama" in provider_clean:
                 url = f"http://{str(target_ip).strip()}:{str(target_port).strip()}/api/chat"
                 payload = {
@@ -431,7 +438,7 @@ def reconstruct_pages_via_vlm(target_doc_id, provider, model_name, target_ip, ta
                     "stream": False
                 }
                 try:
-                    res = requests.post(url, json=payload, timeout=None)
+                    res = requests.post(url, json=payload, timeout=VLM_TIMEOUT_SECONDS)
                     if res.status_code == 200:
                         vlm_text = res.json().get("message", {}).get("content", "")
                     else:
@@ -452,7 +459,7 @@ def reconstruct_pages_via_vlm(target_doc_id, provider, model_name, target_ip, ta
                     "stream": False
                 }
                 try:
-                    res = requests.post(url, json=payload, timeout=None)
+                    res = requests.post(url, json=payload, timeout=VLM_TIMEOUT_SECONDS)
                     if res.status_code == 200:
                         vlm_text = res.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                     else:
