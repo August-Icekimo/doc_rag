@@ -1,6 +1,7 @@
 # 專案架構點評
 
 > 評估日期：2026-06-09  
+> 複核日期：2026-06-12  
 > 評估範圍：`app_flask.py`、`config/settings.py`、`indexer/`、`retriever/`、`model/`
 
 ---
@@ -23,7 +24,7 @@
 
 ## 問題（依嚴重程度排序）
 
-### 1. 模型每次請求重新初始化（效能重傷）
+### ✅ 1. 模型每次請求重新初始化（效能重傷）
 
 `retriever/retriever.py:11-12`
 
@@ -38,7 +39,7 @@ def execute_rag_retrieval(user_query, target_id):
 
 ---
 
-### 2. 全域 TASK_STATUS 無鎖（競態條件）
+### ✅ 2. 全域 TASK_STATUS 無鎖（競態條件）
 
 `app_flask.py:78-82`
 
@@ -58,19 +59,19 @@ TASK_STATUS["ocr"]["running"] = True  # 兩者同時進入
 
 ---
 
-### 3. Provider 正規化邏輯重複
+### ⚠️ 3. Provider 正規化邏輯重複
 
 `app_flask.py:179-185` 與 `model/llm.py:21-22` 都有獨立的 provider 字串清理邏輯，兩處行為不完全一致，日後容易出現不同步的 bug。應集中到 `model/llm.py` 一處。
 
 ---
 
-### 4. 無 Storage 抽象層
+### ❌ 4. 無 Storage 抽象層
 
 `chromadb` 的 import 散落在 `indexer.py`、`retriever.py`、`ocr_loader.py`、`app_flask.py` 四個檔案共計超過 10 處。若日後換 pgvector 或其他後端，需逐一修改。缺少一個 `VectorStore` 介面。
 
 ---
 
-### 5. Chunk ID 重複寫入問題
+### ✅ 5. Chunk ID 重複寫入問題
 
 `indexer/indexer.py:18-37`
 
@@ -78,7 +79,7 @@ TASK_STATUS["ocr"]["running"] = True  # 兩者同時進入
 
 ---
 
-### 6. 圖片路徑硬存 metadata，路徑可移動性為零
+### ✅ 6. 圖片路徑硬存 metadata，路徑可移動性為零
 
 `indexer/ocr_loader.py:228-231`
 
@@ -90,7 +91,7 @@ TASK_STATUS["ocr"]["running"] = True  # 兩者同時進入
 
 ---
 
-### 7. VLM 請求 `timeout=None`
+### ⚠️ 7. VLM 請求 `timeout=None`
 
 `indexer/ocr_loader.py:419`
 
@@ -102,7 +103,7 @@ res = requests.post(url, json=payload, timeout=None)
 
 ---
 
-### 8. Flask 以 `debug=True` 啟動
+### ❌ 8. Flask 以 `debug=True` 啟動
 
 `app_flask.py:454`
 
@@ -127,11 +128,13 @@ app.run(host="127.0.0.1", port=5000, debug=True)
 
 ## 優先修復順序
 
-| 優先序 | 問題 | 預估改動範圍 | 收益 |
-|--------|------|------------|------|
-| P1 | 模型 singleton | `retriever.py`、`app_flask.py` 各 ~5 行 | 查詢速度大幅提升 |
-| P2 | TASK_STATUS 加鎖 | `app_flask.py` ~10 行 | 消除競態條件 |
-| P3 | `upsert` 取代 `add` | `indexer.py` 1 行 | 重複索引不再報錯 |
-| P4 | 圖片路徑相對化 | `ocr_loader.py` ~5 行 | 跨機器部署可用 |
-| P5 | Provider 正規化集中 | `app_flask.py` 刪除、`llm.py` 調整 | 消除重複邏輯 |
-| Backlog | Storage 抽象層 | 新增 `storage/` 模組 | 為 pgvector 遷移鋪路 |
+| 優先序 | 狀態 | 問題 | 預估改動範圍 | 收益 |
+|--------|------|------|------------|------|
+| P1 | ✅ 完成 | 模型 singleton | `retriever.py`、`app_flask.py` 各 ~5 行 | 查詢速度大幅提升 |
+| P2 | ✅ 完成 | TASK_STATUS 加鎖 | `app_flask.py` ~10 行 | 消除競態條件 |
+| P3 | ✅ 完成 | `upsert` 取代 `add` | `indexer.py` 1 行 | 重複索引不再報錯 |
+| P4 | ✅ 完成 | 圖片路徑相對化 | `ocr_loader.py` ~5 行 | 跨機器部署可用 |
+| P5 | ⚠️ 部分 | Provider 正規化集中 | `app_flask.py` 刪除、`llm.py` 調整 | 消除重複邏輯 |
+| — | ⚠️ 部分 | VLM timeout 有限化 | `ocr_loader.py` 2 行 + cancel 檢查 | 防止 thread 永久掛住 |
+| — | ❌ 待修 | Flask `debug=False` | `app_flask.py` 1 行 | 消除雙 process 狀態分裂 |
+| Backlog | ❌ 待議 | Storage 抽象層 | 新增 `storage/` 模組 | 為 pgvector 遷移鋪路 |
