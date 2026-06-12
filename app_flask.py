@@ -40,11 +40,19 @@ NOTES_FILE = os.path.join(CHROMADB_DIR, "database_notes.json")
 
 app = Flask(__name__, template_folder="templates")
 
+# Debug 模式預設關閉；設定環境變數 FLASK_DEBUG=1 才會啟用 Werkzeug reloader。
+# 關閉時僅有單一 process，可避免 TASK_STATUS 出現父子兩份獨立副本。
+FLASK_DEBUG_MODE = os.environ.get("FLASK_DEBUG", "0") == "1"
+
+# Debug 模式下只有 reloader 的子 process（WERKZEUG_RUN_MAIN=true）是真正服務請求的 process；
+# 非 debug 模式下沒有 reloader，目前的 process 即為工作 process。
+IS_ACTIVE_WORKER = (not FLASK_DEBUG_MODE) or os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+
 # Initialize Thread Lock
 status_lock = threading.Lock()
 
 # Global Task Status initialization controlled via Werkzeug Environment variable
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+if IS_ACTIVE_WORKER:
     print("[Flask Reloader] Real child process detected. Initializing TASK_STATUS cluster.")
     TASK_STATUS = {
         "ocr": {"running": False, "msg": "Idle", "success": True},
@@ -84,7 +92,7 @@ def preload_and_verify_weights():
     print("==================================================\n")
 
 # Run preloading only in the active worker process to prevent double memory usage
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true":
+if IS_ACTIVE_WORKER:
     preload_and_verify_weights()
 
 # =====================================================================
@@ -729,5 +737,5 @@ def api_import_database():
         return jsonify({"error": error_msg}), 400 if "維度不符" in str(error_msg) else 500
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=FLASK_DEBUG_MODE)
 
