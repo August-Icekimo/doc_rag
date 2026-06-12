@@ -18,17 +18,19 @@ def get_local_models(base_url, provider="LM Studio"):
     return []
 
 def query_llm(prompt, provider="groq", model_name="", api_key="", custom_ip="localhost", custom_port="11434"):
+    # 唯一的 provider 正規化入口：所有呼叫端傳入原始字串即可
+    # 使用子字串比對以涵蓋 "LM Studio"、"Ollama" 等變體寫法
     p_clean = provider.lower().strip()
     clean_ip = custom_ip.replace("http://", "").replace("https://", "").strip("/")
 
-    if p_clean == "groq":
+    if "groq" in p_clean:
         client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
         current_max_tokens = 1024
-    elif p_clean == "lmstudio":
+    elif "lmstudio" in p_clean or "lm studio" in p_clean:
         # 不分本地遠端，完全由 custom_ip 與 custom_port 組裝連線網址
         client = OpenAI(api_key="lm-studio-local", base_url=f"http://{clean_ip}:{custom_port}/v1")
         current_max_tokens = 4096
-    elif p_clean == "ollama":
+    elif "ollama" in p_clean:
         # 不分本地遠端，完全由 custom_ip 與 custom_port 組裝連線網址
         client = OpenAI(api_key="ollama", base_url=f"http://{clean_ip}:{custom_port}/v1")
         current_max_tokens = 4096

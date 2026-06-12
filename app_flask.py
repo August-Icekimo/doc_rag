@@ -236,17 +236,9 @@ def background_query_worker(user_query, target_id, provider, model_name, api_key
 
 請提供條理清晰的繁體中文回答："""
         
-        p_clean = provider.lower().strip()
-        if "lmstudio" in p_clean:
-            p_val = "lmstudio"
-        elif "ollama" in p_clean:
-            p_val = "ollama"
-        else:
-            p_val = "groq"
-        
         answer = query_llm(
             prompt=full_prompt,
-            provider=p_val,
+            provider=provider,
             model_name=model_name,
             api_key=api_key,
             custom_ip=target_ip,
